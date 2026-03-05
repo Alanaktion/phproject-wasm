@@ -271,7 +271,7 @@
         const releaseData = await apiResp.json();
         const asset = releaseData.assets.find(a => a.name.endsWith('.zip'));
         if (!asset) throw new Error('No .zip asset found in the latest Phproject release');
-        zipUrl = asset.browser_download_url;
+        zipUrl = asset.url;
         setStatus(`Downloading ${asset.name} (${(asset.size / 1048576).toFixed(1)} MB)…`);
       } catch (err) {
         showError('Could not fetch release info from GitHub:\n' + err.message);
@@ -283,7 +283,9 @@
       // 5. Download the Phproject release zip, showing streaming progress
       let zipBytes;
       try {
-        const zipResp = await fetch(zipUrl);
+        const zipResp = await fetch(zipUrl, {
+          headers: { Accept: 'application/octet-stream' },
+        });
         if (!zipResp.ok) throw new Error('Download failed — HTTP ' + zipResp.status);
 
         const contentLength = zipResp.headers.get('Content-Length');
