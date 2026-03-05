@@ -1,0 +1,383 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Phproject — Loading…</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #1a1a2e;
+      color: #e0e0e0;
+      min-height: 100dvh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .card {
+      background: #16213e;
+      border: 1px solid #0f3460;
+      border-radius: 12px;
+      padding: 2.5rem 3rem;
+      max-width: 480px;
+      width: 90%;
+      text-align: center;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    }
+
+    .logo {
+      font-size: 2rem;
+      font-weight: 700;
+      color: #e94560;
+      margin-bottom: 0.5rem;
+      letter-spacing: -0.5px;
+    }
+
+    .tagline {
+      color: #8888aa;
+      font-size: 0.9rem;
+      margin-bottom: 2rem;
+    }
+
+    #status-text {
+      font-size: 1rem;
+      color: #aaaacc;
+      min-height: 1.5em;
+      margin-bottom: 1.5rem;
+      white-space: pre-wrap;
+    }
+
+    .progress-bar-container {
+      background: #0f3460;
+      border-radius: 999px;
+      height: 6px;
+      overflow: hidden;
+      margin-bottom: 1.5rem;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #e94560, #0f3460 200%);
+      border-radius: 999px;
+      width: 0%;
+      transition: width 0.4s ease;
+    }
+    .progress-bar.indeterminate {
+      width: 40%;
+      animation: slide 1.4s infinite ease-in-out;
+    }
+    @keyframes slide {
+      0%   { transform: translateX(-100%); }
+      50%  { transform: translateX(150%); }
+      100% { transform: translateX(400%); }
+    }
+
+    #error-box {
+      display: none;
+      background: #3d0a14;
+      border: 1px solid #e94560;
+      border-radius: 8px;
+      padding: 1rem;
+      text-align: left;
+      font-size: 0.85rem;
+      color: #ffaaaa;
+      word-break: break-word;
+      white-space: pre-wrap;
+      margin-bottom: 1rem;
+    }
+
+    .note {
+      font-size: 0.8rem;
+      color: #555577;
+      margin-top: 1.5rem;
+    }
+    .note a { color: #7777aa; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">Phproject</div>
+    <div class="tagline">Lightweight project management — running entirely in your browser</div>
+
+    <div id="status-text">Initialising…</div>
+
+    <div class="progress-bar-container">
+      <div id="progress-bar" class="progress-bar indeterminate"></div>
+    </div>
+
+    <div id="error-box"></div>
+
+    <div class="note">
+      Powered by <a href="https://github.com/seanmorris/php-wasm" target="_blank" rel="noopener">php-wasm</a>
+      &amp; <a href="https://github.com/alanaktion/phproject" target="_blank" rel="noopener">Phproject</a>
+    </div>
+  </div>
+
+  <script type="module">
+    const statusEl   = document.getElementById('status-text');
+    const progressEl = document.getElementById('progress-bar');
+    const errorEl    = document.getElementById('error-box');
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+      console.log('[phproject-wasm]', msg);
+    }
+
+    function setProgress(pct) {
+      progressEl.classList.remove('indeterminate');
+      progressEl.style.width = pct + '%';
+    }
+
+    function showError(msg) {
+      errorEl.style.display = 'block';
+      errorEl.textContent   = msg;
+      progressEl.classList.remove('indeterminate');
+      progressEl.style.background = '#e94560';
+      progressEl.style.width      = '100%';
+      setStatus('Setup failed — see error below.');
+    }
+
+    // ── Wait for a service worker to reach a target state ────────────────────
+    function waitForWorkerState(worker, targetState) {
+      if (worker.state === targetState) return Promise.resolve(worker);
+      return new Promise((resolve, reject) => {
+        function handler() {
+          if (this.state === targetState) {
+            this.removeEventListener('statechange', handler);
+            resolve(this);
+          } else if (this.state === 'redundant') {
+            this.removeEventListener('statechange', handler);
+            reject(new Error('Service worker became redundant'));
+          }
+        }
+        worker.addEventListener('statechange', handler);
+      });
+    }
+
+    // ── Wait for the registration to have an active worker ───────────────────
+    async function waitForActivation(reg) {
+      if (reg.active) return waitForWorkerState(reg.active, 'activated');
+
+      const worker = reg.installing || reg.waiting;
+      if (worker) return waitForWorkerState(worker, 'activated');
+
+      return new Promise((resolve, reject) => {
+        reg.addEventListener('updatefound', () => {
+          waitForWorkerState(reg.installing, 'activated').then(resolve).catch(reject);
+        }, { once: true });
+      });
+    }
+
+    // ── Direct message-passing helper ────────────────────────────────────────
+    // Uses getRegistration('./app/') because the SW scope is /app/ but this
+    // installer page lives at the root (outside the SW's scope).
+    async function sendMessage(action, params = []) {
+      const reg = await navigator.serviceWorker.getRegistration('./app/');
+      if (!reg || !reg.active) {
+        throw new Error('Service worker not active for scope ./app/');
+      }
+      const token = crypto.randomUUID();
+      return new Promise((resolve, reject) => {
+        const handler = (event) => {
+          if (event.data && event.data.re === token) {
+            navigator.serviceWorker.removeEventListener('message', handler);
+            if (event.data.error) {
+              reject(new Error(typeof event.data.error === 'string'
+                ? event.data.error
+                : JSON.stringify(event.data.error)));
+            } else {
+              resolve(event.data.result);
+            }
+          }
+        };
+        navigator.serviceWorker.addEventListener('message', handler);
+        reg.active.postMessage({ action, params, token });
+      });
+    }
+
+    // ── Main installation flow ────────────────────────────────────────────────
+    async function main() {
+      // 1. Check for service-worker support
+      if (!('serviceWorker' in navigator)) {
+        showError('Service Workers are not supported in this browser.\n'
+          + 'Please use a modern browser such as Chrome 91+, Firefox 116+, or Safari 16.4+.');
+        return;
+      }
+
+      setStatus('Registering service worker…');
+
+      let swReg;
+      try {
+        // Register scoped to /app/ so the installer page (at root) is NOT
+        // intercepted by the SW — only the Phproject app pages are.
+        swReg = await navigator.serviceWorker.register('./sw.js', {
+          type: 'module',
+          scope: './app/',
+        });
+      } catch (err) {
+        showError('Service worker registration failed: ' + err.message
+          + '\n\nEnsure the page is served over HTTPS or localhost, '
+          + 'and that sw.js is accessible at the root of the site.');
+        return;
+      }
+
+      setStatus('Loading PHP WebAssembly runtime…\n(first load may take 20–60 s while runtime is fetched from CDN)');
+
+      // 2. Wait for the SW to fully activate.
+      //    The SW imports PhpCgiWorker.mjs from CDN during installation, which
+      //    can take several seconds on a slow connection.
+      try {
+        await waitForActivation(swReg);
+      } catch (err) {
+        showError('Service worker activation failed: ' + err.message);
+        return;
+      }
+
+      setProgress(5);
+      setStatus('Checking installation…');
+
+      // 3. Check whether Phproject has already been set up in a previous visit
+      let installCheck;
+      try {
+        installCheck = await sendMessage('analyzePath', ['/persist/phproject/config.php']);
+      } catch (err) {
+        showError('Could not communicate with service worker: ' + err.message);
+        return;
+      }
+
+      if (installCheck && installCheck.exists) {
+        setStatus('Phproject is already installed — redirecting…');
+        setProgress(100);
+        window.location.href = './app/';
+        return;
+      }
+
+      // ── First-run installation ────────────────────────────────────────────
+
+      // 4. Fetch the latest Phproject release info from the GitHub API
+      setStatus('Fetching latest Phproject release info…');
+      setProgress(10);
+
+      let zipUrl;
+      try {
+        const apiResp = await fetch(
+          'https://api.github.com/repos/alanaktion/phproject/releases/latest',
+          { headers: { Accept: 'application/vnd.github+json' } }
+        );
+        if (!apiResp.ok) throw new Error('GitHub API returned HTTP ' + apiResp.status);
+        const releaseData = await apiResp.json();
+        const asset = releaseData.assets.find(a => a.name.endsWith('.zip'));
+        if (!asset) throw new Error('No .zip asset found in the latest Phproject release');
+        zipUrl = asset.browser_download_url;
+        setStatus(`Downloading ${asset.name} (${(asset.size / 1048576).toFixed(1)} MB)…`);
+      } catch (err) {
+        showError('Could not fetch release info from GitHub:\n' + err.message);
+        return;
+      }
+
+      setProgress(15);
+
+      // 5. Download the Phproject release zip, showing streaming progress
+      let zipBytes;
+      try {
+        const zipResp = await fetch(zipUrl);
+        if (!zipResp.ok) throw new Error('Download failed — HTTP ' + zipResp.status);
+
+        const contentLength = zipResp.headers.get('Content-Length');
+        const total = contentLength ? parseInt(contentLength, 10) : 0;
+        const reader = zipResp.body.getReader();
+        const chunks = [];
+        let received = 0;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+          received += value.length;
+          if (total > 0) {
+            setProgress(15 + Math.round(35 * received / total));
+            setStatus(
+              `Downloading Phproject… ${(received / 1048576).toFixed(1)} / `
+              + `${(total / 1048576).toFixed(1)} MB`
+            );
+          }
+        }
+
+        const buffer = new Uint8Array(received);
+        let offset = 0;
+        for (const chunk of chunks) { buffer.set(chunk, offset); offset += chunk.length; }
+        zipBytes = buffer;
+      } catch (err) {
+        showError('Download failed:\n' + err.message);
+        return;
+      }
+
+      setStatus('Writing archive to virtual filesystem…');
+      setProgress(52);
+
+      // 6. Write the zip into the WASM filesystem
+      try {
+        await sendMessage('writeFile', ['/persist/phproject.zip', zipBytes]);
+      } catch (err) {
+        showError('Could not write zip to WASM filesystem:\n' + err.message);
+        return;
+      }
+
+      setProgress(56);
+
+      // 7. Write the install configuration that setup.php will read
+      const installConfig = {
+        username: 'admin',
+        password: 'admin',
+        email:    'admin@localhost',
+        siteName: 'Phproject',
+      };
+      try {
+        const configBytes = new TextEncoder().encode(JSON.stringify(installConfig));
+        await sendMessage('writeFile', ['/config/install.json', configBytes]);
+      } catch (err) {
+        showError('Could not write install config:\n' + err.message);
+        return;
+      }
+
+      setStatus('Initialising PHP runtime and extracting Phproject…\n(this may take a minute on first run while the PHP extensions are loaded)');
+      progressEl.classList.add('indeterminate');
+
+      // 8. POST to the setup endpoint — this triggers the PHP runtime (including
+      //    loading the WASM binary and all .so extensions if not yet done),
+      //    extracts the zip, creates the SQLite DB, and writes config.php.
+      let setupResult;
+      try {
+        const setupResp = await fetch('./app/setup/', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        });
+        if (!setupResp.ok) {
+          const body = await setupResp.text().catch(() => '');
+          throw new Error(`HTTP ${setupResp.status}: ${body}`);
+        }
+        setupResult = await setupResp.json();
+        if (!setupResult.success) {
+          throw new Error(setupResult.error || 'Unknown setup error');
+        }
+      } catch (err) {
+        showError('Setup script failed:\n' + err.message
+          + '\n\nOpen the browser DevTools console for PHP error output.');
+        return;
+      }
+
+      setStatus('Installation complete — loading Phproject…');
+      progressEl.classList.remove('indeterminate');
+      setProgress(100);
+
+      await new Promise(r => setTimeout(r, 600));
+      window.location.href = './app/';
+    }
+
+    main().catch(err => showError('Unexpected error:\n' + err.message));
+  </script>
+</body>
+</html>

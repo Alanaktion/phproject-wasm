@@ -1,0 +1,13 @@
+# Dependency directories
+node_modules/
+
+# Build output
+dist/
+.parcel-cache/
+
+# Editor/OS artifacts
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/settings.json

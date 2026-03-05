@@ -1,0 +1,19 @@
+{
+  "name": "phproject-wasm",
+  "version": "0.1.0",
+  "description": "Phproject running entirely in the browser via WebAssembly (php-wasm)",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npx serve . --cors",
+    "lint:php": "php -l scripts/setup.php"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Alanaktion/phproject-wasm.git"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  }
+}
