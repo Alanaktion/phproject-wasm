@@ -5,6 +5,9 @@ node_modules/
 dist/
 .parcel-cache/
 
+# Phproject release asset (downloaded at deploy time, not stored in git)
+releases/
+
 # Editor/OS artifacts
 .DS_Store
 Thumbs.db
