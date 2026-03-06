@@ -25,6 +25,8 @@ Experimental deployment of [Phproject](https://github.com/alanaktion/phproject) 
 ## Development / local preview
 
 ```bash
+# Download the latest Phproject release zip
+bash scripts/download-release.sh
 # Serve with CORS headers (required for Service Worker module imports)
 npx serve . --cors
 ```
@@ -39,7 +41,7 @@ Make sure GitHub Pages is configured to deploy via **GitHub Actions** in your re
 
 ## Architecture
 
-```
+```text
 index.html          — Loader/installer page (served statically, outside SW scope)
 sw.js               — Service Worker (php-cgi-wasm PhpCgiWorker)
 scripts/setup.php   — PHP setup script (preloaded into WASM FS, runs on first visit)
@@ -47,7 +49,7 @@ scripts/setup.php   — PHP setup script (preloaded into WASM FS, runs on first 
 
 The Service Worker intercepts requests under `/app/` and routes them to Phproject's `index.php`. Static assets (CSS, JS, images, fonts) are served directly from the virtual filesystem without invoking PHP.
 
-The setup endpoint (`/app/setup/`) is always available and served from `/config/setup.php` inside the WASM filesystem. It is triggered once during the first-run installation.
+First-run setup is executed by the Service Worker action `runSetupScript`, which runs `setup.php` at `/app/setup.php` inside the WASM filesystem.
 
 ## Limitations
 

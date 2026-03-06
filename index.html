@@ -205,13 +205,19 @@
     }
 
     // ── Direct message-passing helper ────────────────────────────────────────
-    // Uses getRegistration('./app/') because the SW scope is /app/ but this
-    // installer page lives at the root (outside the SW's scope).
-    async function sendMessage(action, params = []) {
-      const reg = await navigator.serviceWorker.getRegistration('./app/');
+    function isTransientSwError(error) {
+      const text = String(error && error.message ? error.message : error).toLowerCase();
+      return text.includes('database connection is closing')
+        || text.includes('invalidstateerror')
+        || text.includes('failed to execute \"transaction\"');
+    }
+
+    async function sendMessageOnce(action, params = []) {
+      const reg = await navigator.serviceWorker.ready;
       if (!reg || !reg.active) {
-        throw new Error('Service worker not active for scope ./app/');
+        throw new Error('Service worker not active');
       }
+
       const token = crypto.randomUUID();
       return new Promise((resolve, reject) => {
         const handler = (event) => {
@@ -226,9 +232,28 @@
             }
           }
         };
+
         navigator.serviceWorker.addEventListener('message', handler);
         reg.active.postMessage({ action, params, token });
       });
+    }
+
+    async function sendMessage(action, params = [], maxAttempts = 3) {
+      let lastError;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          return await sendMessageOnce(action, params);
+        } catch (error) {
+          lastError = error;
+          if (attempt >= maxAttempts || !isTransientSwError(error)) {
+            throw error;
+          }
+          await new Promise(r => setTimeout(r, attempt * 250));
+        }
+      }
+
+      throw lastError || new Error('Unknown service worker messaging error');
     }
 
     // ── Main installation flow ────────────────────────────────────────────────
@@ -242,13 +267,28 @@
 
       setStatus('Registering service worker…');
 
+      // Clean up old /app-scoped registrations from earlier builds.
+      try {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        for (const reg of regs) {
+          const scopePath = new URL(reg.scope).pathname;
+          if (scopePath.endsWith('/app/') || scopePath.endsWith('/app')) {
+            await reg.unregister();
+          }
+        }
+      } catch (_) {
+        // Non-fatal; continue with registration.
+      }
+
       let swReg;
       try {
-        // Register scoped to /app/ so the installer page (at root) is NOT
-        // intercepted by the SW — only the Phproject app pages are.
+        // Register scoped to the site root so the SW controls this page too.
+        // Setup execution is triggered via SW message actions.
+        // handleFetchEvent only calls respondWith() for /app/ prefix URLs,
+        // so static files (index.html, sw.js, releases/, …) still hit the network.
         swReg = await navigator.serviceWorker.register('./sw.js', {
           type: 'module',
-          scope: './app/',
+          scope: './',
         });
       } catch (err) {
         showError('Service worker registration failed: ' + err.message
@@ -268,6 +308,31 @@
         showError('Service worker activation failed: ' + err.message);
         return;
       }
+
+      // On first install/update, reload once if this page is not controlled by
+      // the same worker instance we just activated.
+      const reloadFlag = 'phproject-wasm-sw-control-reload';
+      const activeScript = swReg.active ? new URL(swReg.active.scriptURL).pathname : null;
+      const controller = navigator.serviceWorker.controller;
+      const controllerScript = controller ? new URL(controller.scriptURL).pathname : null;
+      const hasMatchingController = !!controller
+        && !!activeScript
+        && controllerScript === activeScript;
+
+      if (!hasMatchingController) {
+        if (!sessionStorage.getItem(reloadFlag)) {
+          sessionStorage.setItem(reloadFlag, '1');
+          setStatus('Finalising service worker setup…');
+          window.location.reload();
+          return;
+        }
+
+        showError('Service worker activated but this page is still controlled by an older worker. '
+          + 'Please unregister old service workers for this origin and try again.');
+        return;
+      }
+
+      sessionStorage.removeItem(reloadFlag);
 
       setProgress(5);
       setStatus('Checking installation…');
@@ -362,8 +427,9 @@
         email:    'admin@localhost',
         siteName: 'Phproject',
       };
+      const installConfigJson = JSON.stringify(installConfig);
       try {
-        const configBytes = new TextEncoder().encode(JSON.stringify(installConfig));
+        const configBytes = new TextEncoder().encode(installConfigJson);
         await sendMessage('writeFile', ['/config/install.json', configBytes]);
       } catch (err) {
         showError('Could not write install config:\n' + err.message);
@@ -373,20 +439,57 @@
       setStatus('Initialising PHP runtime and extracting Phproject…\n(this may take a minute on first run while the PHP extensions are loaded)');
       progressEl.classList.add('indeterminate');
 
-      // 8. POST to the setup endpoint — this triggers the PHP runtime (including
-      //    loading the WASM binary and all .so extensions if not yet done),
-      //    extracts the zip, creates the SQLite DB, and writes config.php.
+      // Ensure setup.php is present in WASM FS even if preloading is unavailable.
+      // We seed both /config and /persist/phproject so setup can run via
+      // /app/setup.php on the main app vHost.
+      let setupText = '';
+      try {
+        const setupSource = await fetch('./scripts/setup.php', { cache: 'no-store' });
+        if (!setupSource.ok) {
+          throw new Error('Could not download scripts/setup.php (HTTP ' + setupSource.status + ')');
+        }
+
+        setupText = await setupSource.text();
+        const setupBytes = new TextEncoder().encode(setupText);
+        try {
+          await sendMessage('mkdir', ['/persist/phproject']);
+        } catch (_) {
+          // Directory may already exist.
+        }
+        await sendMessage('writeFile', ['/config/setup.php', setupBytes]);
+        await sendMessage('writeFile', ['/persist/phproject/setup.php', setupBytes]);
+      } catch (err) {
+        showError('Could not prepare setup script:\n' + err.message);
+        return;
+      }
+
+      // Preflight: ensure setup.php is available where setup execution expects it.
+      try {
+        const setupScript = await sendMessage('analyzePath', ['/persist/phproject/setup.php']);
+        if (!setupScript || !setupScript.exists) {
+          throw new Error('/persist/phproject/setup.php not found in WASM filesystem');
+        }
+      } catch (err) {
+        showError('Setup preflight failed:\n' + err.message);
+        return;
+      }
+
+      // 8. Run setup.php inside the service worker. This avoids first-load
+      //    fetch interception races while still triggering full PHP setup.
       let setupResult;
       try {
-        const setupResp = await fetch('./app/setup/', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        });
-        if (!setupResp.ok) {
-          const body = await setupResp.text().catch(() => '');
-          throw new Error(`HTTP ${setupResp.status}: ${body}`);
+        const setupResp = await sendMessage('runSetupScript', [zipBytes, installConfigJson, setupText]);
+        if (!setupResp || !setupResp.ok) {
+          const status = setupResp && typeof setupResp.status === 'number'
+            ? setupResp.status
+            : 'unknown';
+          const body = setupResp && typeof setupResp.body === 'string'
+            ? setupResp.body
+            : '';
+          throw new Error(`HTTP ${status}: ${body}`);
         }
-        setupResult = await setupResp.json();
+
+        setupResult = JSON.parse(setupResp.body || '{}');
         if (!setupResult.success) {
           throw new Error(setupResult.error || 'Unknown setup error');
         }

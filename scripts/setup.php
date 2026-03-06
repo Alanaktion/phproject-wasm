@@ -191,7 +191,7 @@ if (!file_exists($dbPath)) {
             'parse.textile'              => '0',
             'site.name'                  => $siteName,
             'site.description'           => 'A high performance full-featured project management system',
-            'site.demo'                  => '0',
+            'site.demo'                  => '1',
             'site.theme'                 => 'css/bootstrap-phproject.css',
             'site.timezone'              => 'Etc/UTC',
             'site.public_registration'   => '0',
