@@ -290,25 +290,19 @@
 
       // ── First-run installation ────────────────────────────────────────────
 
-      // 4. Fetch the latest Phproject release info from the GitHub API
-      setStatus('Fetching latest Phproject release info…');
+      // 4. Load release metadata (bundled at deploy time) for progress display
+      setStatus('Loading Phproject release info…');
       setProgress(10);
 
-      let zipUrl;
+      const zipUrl = './releases/phproject.zip';
       try {
-        const apiResp = await fetch(
-          'https://api.github.com/repos/alanaktion/phproject/releases/latest',
-          { headers: { Accept: 'application/vnd.github+json' } }
-        );
-        if (!apiResp.ok) throw new Error('GitHub API returned HTTP ' + apiResp.status);
-        const releaseData = await apiResp.json();
-        const asset = releaseData.assets.find(a => a.name.endsWith('.zip'));
-        if (!asset) throw new Error('No .zip asset found in the latest Phproject release');
-        zipUrl = 'https://corsproxy.io/?url=' + encodeURIComponent(asset.browser_download_url);
-        setStatus(`Downloading ${asset.name} (${(asset.size / 1048576).toFixed(1)} MB)…`);
-      } catch (err) {
-        showError('Could not fetch release info from GitHub:\n' + err.message);
-        return;
+        const metaResp = await fetch('./releases/phproject.json');
+        if (metaResp.ok) {
+          const meta = await metaResp.json();
+          setStatus(`Downloading ${meta.name} (${(meta.size / 1048576).toFixed(1)} MB)…`);
+        }
+      } catch (_) {
+        // Metadata is optional; proceed without it
       }
 
       setProgress(15);

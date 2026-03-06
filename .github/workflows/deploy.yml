@@ -30,6 +30,27 @@ jobs:
       - name: Lint PHP
         run: php -l scripts/setup.php
 
+      - name: Download Phproject release
+        run: |
+          set -euo pipefail
+          mkdir -p releases
+          RELEASE_JSON=$(curl -sf -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/alanaktion/phproject/releases/latest")
+          RELEASE_TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+          # Extract all asset fields in a single jq pass (first .zip asset only)
+          ASSET=$(echo "$RELEASE_JSON" | jq -r \
+            'first(.assets[] | select(.name | endswith(".zip"))) | "\(.url)\t\(.name)\t\(.size)"')
+          ASSET_URL=$(echo "$ASSET" | cut -f1)
+          ASSET_NAME=$(echo "$ASSET" | cut -f2)
+          ASSET_SIZE=$(echo "$ASSET" | cut -f3)
+          if [ -z "$ASSET_URL" ] || [ "$ASSET_URL" = "null" ]; then
+            echo "Error: No .zip asset found in the latest Phproject release" >&2
+            exit 1
+          fi
+          curl -sfL -H "Accept: application/octet-stream" "$ASSET_URL" -o "releases/phproject.zip"
+          printf '{"name":"%s","size":%s,"version":"%s"}' \
+            "$ASSET_NAME" "$ASSET_SIZE" "$RELEASE_TAG" > releases/phproject.json
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
